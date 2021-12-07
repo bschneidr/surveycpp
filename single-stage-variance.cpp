@@ -23,6 +23,12 @@ arma::mat submat(NumericMatrix X, NumericVector T, int TestVal) {
 }
 
 // [[Rcpp::export]]
+arma::mat remove_col(arma::mat x, int which){
+  x.shed_col(which);
+  return(x);
+}
+
+// [[Rcpp::export]]
 arma::rowvec col_sums(arma::mat x){
   arma::mat X = arma::mat(x.begin(), x.n_rows, x.n_cols, false);
   return arma::sum(X, 0);
@@ -255,7 +261,307 @@ Rcpp::NumericMatrix single_stage_variance(Rcpp::NumericMatrix Y,
   return result;
 }
 
+// [[Rcpp::export]]
+arma::mat arma_onestage(arma::mat Y,
+                        arma::colvec samp_unit_ids,
+                        arma::colvec strata,
+                        arma::colvec strata_pop_sizes) {
+
+  // Determine dimensions of result
+  size_t n_col_y = Y.n_cols;
+  arma::mat result(n_col_y, n_col_y, arma::fill::zeros);
+
+  // Get distinct strata ids and their length, H
+  arma::colvec distinct_strata_ids = unique(strata);
+
+  arma::uword H = distinct_strata_ids.n_elem;
+
+  // Initialize vectors giving number of PSUs per stratum
+  // and vector giving sampling fraction
+  arma::uvec n_h (H, arma::fill::ones);
+  arma::uvec N_h (H, arma::fill::ones);
+  arma::dvec f_h (H, arma::fill::zeros);
+
+  // Get information from each stratum:
+  // - Number of sampling units, in sample and population
+  // - Sampling fraction, if applicable
+  // - Contribution to sampling variance
+  for (arma::uword h = 0; h < H; ++h) {
+
+    // Determine which rows of data correspond to the current stratum
+    arma::uvec h_indices = arma::find(strata==distinct_strata_ids[h]);
+
+    // Get count of sampling units in stratum
+    arma::colvec h_distinct_samp_unit_ids = unique(samp_unit_ids.elem(h_indices));
+    n_h[h] = h_distinct_samp_unit_ids.n_elem;
+    N_h[h] = min(strata_pop_sizes.elem(h_indices));
+    f_h[h] = static_cast<double>(n_h[h]) /  static_cast<double>(N_h[h]);
+
+    arma::mat Y_h = Y.rows(h_indices);
+    arma::rowvec mean_Yhi = arma::sum(Y_h, 0) / n_h[h];
+
+    arma::uword df;
+    if (n_h[h] > 1) {
+      df = n_h[h] - 1;
+    } else {
+      df = 1;
+    }
+    arma::mat cov_mat(n_col_y, n_col_y, arma::fill::zeros);
+    for (arma::uword i=0; i < h_distinct_samp_unit_ids.n_elem; ++i ) {
+      arma::uvec unit_indices = arma::find(samp_unit_ids.elem(h_indices) == h_distinct_samp_unit_ids[i]);
+      arma::rowvec Yhi = sum(Y_h.rows(unit_indices), 0);
+      Yhi = Yhi - mean_Yhi;
+
+      cov_mat += (arma::trans(Yhi)*Yhi);
+    }
+    cov_mat = cov_mat / df;
+
+    result += ((1 - f_h[h]) * n_h[h]) * cov_mat;
+  }
+
+  return result;
+}
+
+// [[Rcpp::export]]
+arma::mat arma_multistage(arma::mat Y,
+                          arma::mat samp_unit_ids,
+                          arma::mat strata,
+                          arma::mat strata_pop_sizes) {
+
+  size_t n_stages = samp_unit_ids.n_cols;
+
+  arma::mat later_stage_ids;
+  arma::mat later_stage_strata;
+  arma::mat later_stage_strata_pop_sizes;
+
+  if (n_stages > 1) {
+    later_stage_ids = samp_unit_ids.tail_cols(n_stages - 1);
+    later_stage_strata = strata.tail_cols(n_stages - 1);
+    later_stage_strata_pop_sizes = strata_pop_sizes.tail_cols(n_stages-1);
+  }
+
+  // Obtain first stage information
+  arma::colvec first_stage_ids = samp_unit_ids.col(0);
+  arma::colvec first_stage_strata = strata.col(0);
+  arma::colvec first_stage_strata_pop_sizes = strata_pop_sizes.col(0);
+
+  // Calculate first-stage variance
+  arma::mat V = arma_onestage(Y = Y,
+                              samp_unit_ids = first_stage_ids,
+                              strata = first_stage_strata,
+                              strata_pop_sizes = first_stage_strata_pop_sizes);
+
+  // For each first-stage unit, get variance contribution from next stage
+  if (n_stages > 1) {
+
+    // Get distinct first-stage strata ids and their length, H
+    arma::colvec distinct_strata_ids = unique(first_stage_strata);
+    arma::uword H = distinct_strata_ids.n_elem;
+
+    for (arma::uword h = 0; h < H; ++h) {
+
+      // Determine which rows of data correspond to the current first-stage stratum
+      arma::uvec h_indices = arma::find(first_stage_strata==distinct_strata_ids(h));
+
+      // Get submatrices of inputs corresponding to the current first-stage stratum
+      arma::mat Y_h = Y.rows(h_indices);
+
+      arma::mat h_samp_unit_ids = later_stage_ids.rows(h_indices);
+
+      arma::mat h_strata = later_stage_strata.rows(h_indices);
+
+      arma::mat h_strata_pop_sizes = later_stage_strata_pop_sizes.rows(h_indices);
+
+      // Get count of first-stage sampling units in first-stage stratum
+      // and finite population correction
+      arma::colvec h_first_stage_units = first_stage_ids.elem(h_indices);
+      arma::colvec h_unique_psus = unique(h_first_stage_units);
+      arma::uword n_h = h_unique_psus.n_elem;
+      arma::uword N_h = min(first_stage_strata_pop_sizes.elem(h_indices));
+      double f_h = static_cast<double>(n_h) /  static_cast<double>(N_h);
+
+      for (arma::uword i=0; i < n_h; ++i ) {
+        arma::uvec unit_indices = arma::find(first_stage_ids.elem(h_indices) == h_unique_psus(i));
+        arma::mat Y_hi = Y_h.rows(unit_indices);
+        arma::mat hi_samp_unit_ids = h_samp_unit_ids.rows(unit_indices);
+        //hi_samp_unit_ids = remove_col(h_samp_unit_ids, 0);
+        arma::mat hi_strata = h_strata.rows(unit_indices);
+        arma::mat hi_strata_pop_sizes = h_strata_pop_sizes.rows(unit_indices);
+
+        arma::mat V_hi = f_h * arma_multistage(Y_hi,
+                                               hi_samp_unit_ids,
+                                               hi_strata,
+                                               hi_strata_pop_sizes);
+        V += V_hi;
+
+      }
+    }
+  }
+  return V;
+}
+
+// [[Rcpp::export]]
+arma::mat arma_multistage2(arma::mat Y,
+                          arma::mat samp_unit_ids,
+                          arma::mat strata,
+                          arma::mat strata_pop_sizes) {
+
+  // Obtain first stage information
+  arma::colvec first_stage_ids = samp_unit_ids.col(0);
+  arma::colvec first_stage_strata = strata.col(0);
+  arma::colvec first_stage_strata_pop_sizes = strata_pop_sizes.col(0);
+
+  // Calculate first-stage variance
+  arma::mat V = arma_onestage(Y = Y,
+                              samp_unit_ids = first_stage_ids,
+                              strata = first_stage_strata,
+                              strata_pop_sizes = first_stage_strata_pop_sizes);
+
+  return V;
+}
+
+// [[Rcpp::export]]
+Rcpp::List cLists(List x, List y) {
+  int nsize = x.size();
+  int msize = y.size();
+  Rcpp::List out(nsize + msize);
+
+  for(int i = 0; i < nsize; i++) {
+    out[i] = x[i];
+  }
+  for(int i = 0; i < msize; i++) {
+    out[nsize+i] = y[i];
+  }
+
+  return(out);
+}
+
+// [[Rcpp::export]]
+Rcpp::List append_list_to_list(List x, List y) {
+  int nsize = x.size();
+  Rcpp::List out(nsize + 1);
+  for(int i = 0; i < nsize; i++) {
+    out[i] = x[i];
+  }
+  out[nsize] = y;
+  return out;
+}
+
+
+// [[Rcpp::export]]
+Rcpp::List arma_multistage_debug (arma::mat Y,
+                                  arma::mat samp_unit_ids,
+                                  arma::mat strata,
+                                  arma::mat strata_pop_sizes) {
+
+  size_t n_stages = samp_unit_ids.n_cols;
+
+  arma::mat later_stage_ids = samp_unit_ids.tail_cols(n_stages - 1);
+  arma::mat later_stage_strata = strata.tail_cols(n_stages - 1);
+  arma::mat later_stage_strata_pop_sizes = strata_pop_sizes.tail_cols(n_stages-1);
+
+  // Obtain first stage information
+  arma::colvec first_stage_ids = samp_unit_ids.col(0);
+  arma::colvec first_stage_strata = strata.col(0);
+  arma::colvec first_stage_strata_pop_sizes = strata_pop_sizes.col(0);
+
+  // Calculate first-stage variance
+  arma::mat V = arma_onestage(Y = Y,
+                              samp_unit_ids = first_stage_ids,
+                              strata = first_stage_strata,
+                              strata_pop_sizes = first_stage_strata_pop_sizes);
+
+  Rcpp::List result = Rcpp::List::create(n_stages);
+  result[0] = wrap(samp_unit_ids);
+
+  //arma::mat result;
+  // For each first-stage unit, get variance contribution from next stage
+  if (n_stages > 1) {
+
+    // Get distinct first-stage strata ids and their length, H
+    arma::colvec distinct_strata_ids = unique(first_stage_strata);
+    arma::uword H = distinct_strata_ids.n_elem;
+
+    for (arma::uword h = 0; h < H; ++h) {
+
+      // Determine which rows of data correspond to the current first-stage stratum
+      arma::uvec h_indices = arma::find(first_stage_strata==distinct_strata_ids(h));
+
+      // Get submatrices of inputs corresponding to the current first-stage stratum
+      arma::mat Y_h = Y.rows(h_indices);
+
+      //result = Y_h;
+      arma::mat h_samp_unit_ids = later_stage_ids.rows(h_indices);
+
+      arma::mat h_strata = later_stage_strata.rows(h_indices);
+
+      arma::mat h_strata_pop_sizes = later_stage_strata_pop_sizes.rows(h_indices);
+
+      // Get count of first-stage sampling units in first-stage stratum
+      // and finite population correction
+      arma::colvec h_first_stage_units = first_stage_ids.elem(h_indices);
+      arma::colvec h_unique_psus = unique(h_first_stage_units);
+      arma::uword n_h = h_unique_psus.n_elem;
+      arma::uword N_h = min(first_stage_strata_pop_sizes.elem(h_indices));
+      double f_h = static_cast<double>(n_h) /  static_cast<double>(N_h);
+      if (FALSE) {
+        f_h = f_h * 2;
+      }
+
+      for (arma::uword i=0; i < n_h; ++i ) {
+        arma::uvec unit_indices = arma::find(first_stage_ids.elem(h_indices) == h_unique_psus(i));
+        arma::mat Y_hi = Y_h.rows(unit_indices);
+        arma::mat hi_samp_unit_ids = h_samp_unit_ids.rows(unit_indices);
+        //hi_samp_unit_ids = remove_col(h_samp_unit_ids, 0);
+        arma::mat hi_strata = h_strata.rows(unit_indices);
+        arma::mat hi_strata_pop_sizes = h_strata_pop_sizes.rows(unit_indices);
+
+        arma::mat V_hi = arma_multistage(Y_hi,
+                                         hi_samp_unit_ids,
+                                         hi_strata,
+                                         hi_strata_pop_sizes);
+
+        Rcpp::List result_hi = Rcpp::List::create(Rcpp::Named("Y_hi") = Y_hi,
+                                                  Rcpp::Named("hi_samp_unit_ids") = hi_samp_unit_ids,
+                                                  Rcpp::Named("hi_strata") = hi_strata,
+                                                  Rcpp::Named("hi_strata_pop_sizes") = hi_strata_pop_sizes,
+                                                  Rcpp::Named("V_hi") = V_hi);
+
+
+
+        result = append_list_to_list(result, result_hi);
+
+      }
+      // // Get matrix of data for stratum
+      //
+      // for (arma::uword i=0; i < n_h; ++i ) {
+      //   arma::uvec unit_indices = arma::find(h_first_stage_units == h_distinct_samp_unit_ids[i]);
+      //
+      //   // Get submatrices of inputs corresponding to the current first-stage sampling-unit
+      //   arma::mat Y_hi = Y_h.rows(unit_indices);
+      //   arma::mat hi_samp_unit_ids = h_samp_unit_ids.rows(unit_indices);
+      //   hi_samp_unit_ids = hi_samp_unit_ids.tail_cols(n_stages - 1);
+      //   arma::mat hi_strata = h_strata.rows(unit_indices);
+      //   hi_strata = hi_strata.tail_cols(n_stages - 1);
+      //   arma::mat hi_strata_pop_sizes = h_strata_pop_sizes.rows(unit_indices);
+      //   hi_strata_pop_sizes = hi_strata_pop_sizes.tail_cols(n_stages - 1);
+      //
+      //   // Get variance from later stages of sampling within current first-stage sampling unit
+      //   if (TRUE) {
+      //     V += f_h * arma_multistage(Y = Y_hi,
+      //                                samp_unit_ids = hi_samp_unit_ids,
+      //                                strata = hi_strata,
+      //                                strata_pop_sizes = hi_strata_pop_sizes);
+      //   }
+      // }
+    }
+  }
+  return result;
+}
+
+
 /*** R
+if (FALSE) {
 # Generate example data,
 # starting from a small data frame
 # and replicating its rows
@@ -271,7 +577,7 @@ df <- data.frame(
 
 large_df <- df
 increment <- 1
-for (i in 1:100) {
+for (i in 1:2000) {
   new_df <- df
   new_df[['Stratum']] <- new_df[['Stratum']] + (2*i)
   large_df <- rbind(large_df, new_df)
@@ -295,6 +601,20 @@ single_stage_variance(Y = Y,
                       strata_pop_sizes = strata_pop_sizes,
                       singleton_method = 'remove')
 
+arma_onestage(
+  Y = Y,
+  samp_unit_ids = samp_unit_ids,
+  strata = strata,
+  strata_pop_sizes = strata_pop_sizes
+)
+
+arma_multistage(
+  Y = Y,
+  samp_unit_ids = as.matrix(samp_unit_ids),
+  strata = as.matrix(strata),
+  strata_pop_sizes = as.matrix(strata_pop_sizes)
+)
+
 if (TRUE) {
 
   # Check that results match
@@ -312,6 +632,20 @@ if (TRUE) {
                                  stage = 1) |> unname()
   )
 
+  # Check that results match
+  testthat::expect_equal(
+    object = arma_onestage(
+      Y = Y,
+      samp_unit_ids = samp_unit_ids,
+      strata = strata,
+      strata_pop_sizes = strata_pop_sizes) |> unname(),
+    expected = survey:::onestage(x = Y, strata = large_df[['Stratum']],
+                                 clusters = large_df[['PSU']],
+                                 nPSU = fpcs$sampsize,
+                                 fpc = fpcs$popsize,
+                                 stage = 1) |> unname()
+  )
+
   # Compare speed
   microbenchmark::microbenchmark(
     'Rcpp' = single_stage_variance(Y = Y,
@@ -319,6 +653,10 @@ if (TRUE) {
                                    strata = strata,
                                    strata_pop_sizes = strata_pop_sizes,
                                    singleton_method = 'fail'),
+    'arma' = arma_onestage(Y = Y,
+                           samp_unit_ids = samp_unit_ids,
+                           strata = strata,
+                           strata_pop_sizes = strata_pop_sizes),
     'survey:::onestage()' = survey:::onestage(x = Y, strata = large_df[['Stratum']],
                                               clusters = large_df[['PSU']],
                                               nPSU = fpcs$sampsize,
@@ -329,5 +667,6 @@ if (TRUE) {
                                               stratas = stratas,
                                               fpcs = fpcs)
   )
+}
 }
 */
