@@ -103,6 +103,33 @@ NumericMatrix covRcpp(Rcpp::NumericMatrix & X,
 }
 
 // [[Rcpp::export]]
+arma::mat arma_cov(arma::mat Y,
+                   arma::uvec ids) {
+  arma::mat cov_mat(Y.n_cols, Y.n_cols, arma::fill::zeros);
+
+  arma::uvec unique_ids = unique(ids);
+
+  arma::uword n = unique_ids.n_elem;
+
+  arma::uword df;
+  if (n > 1) {
+    df = n - 1;
+  } else {
+    df = 1;
+  }
+
+  arma::rowvec mean_Yi = sum(Y, 0) / n;
+  for (arma::uword i=0; i < n; ++i) {
+    arma::uvec s = arma::find(ids == unique_ids[i]);
+    arma::rowvec Yi = sum(Y.rows(s), 0);
+    Yi = Yi - mean_Yi;
+    cov_mat += (arma::trans(Yi)*Yi);
+  }
+  cov_mat = cov_mat / df;
+  return cov_mat;
+}
+
+// [[Rcpp::export]]
 NumericMatrix cpp_subset_rows(NumericMatrix m, IntegerVector rows){
 
   int rl = rows.length();
