@@ -6,7 +6,8 @@
 arma::mat arma_onestage(arma::mat Y,
                         arma::colvec samp_unit_ids,
                         arma::colvec strata,
-                        arma::colvec strata_pop_sizes) {
+                        arma::colvec strata_pop_sizes,
+                        Rcpp::CharacterVector singleton_method) {
 
   // Determine dimensions of result
   size_t n_col_y = Y.n_cols;
@@ -67,7 +68,8 @@ arma::mat arma_onestage(arma::mat Y,
 arma::mat arma_multistage(arma::mat Y,
                           arma::mat samp_unit_ids,
                           arma::mat strata,
-                          arma::mat strata_pop_sizes) {
+                          arma::mat strata_pop_sizes,
+                          Rcpp::CharacterVector singleton_method) {
 
   size_t n_stages = samp_unit_ids.n_cols;
 
@@ -94,7 +96,8 @@ arma::mat arma_multistage(arma::mat Y,
   arma::mat V = arma_onestage(Y = Y,
                               samp_unit_ids = first_stage_ids,
                               strata = first_stage_strata,
-                              strata_pop_sizes = first_stage_strata_pop_sizes);
+                              strata_pop_sizes = first_stage_strata_pop_sizes,
+                              singleton_method = singleton_method);
 
   // For each first-stage unit, get variance contribution from next stage
   if (n_stages > 1) {
@@ -137,7 +140,8 @@ arma::mat arma_multistage(arma::mat Y,
         arma::mat V_hi = f_h * arma_multistage(Y_hi,
                                                hi_samp_unit_ids,
                                                hi_strata,
-                                               hi_strata_pop_sizes);
+                                               hi_strata_pop_sizes,
+                                               singleton_method);
         V += V_hi;
 
       }
@@ -252,7 +256,8 @@ arma::mat arma_multistage(arma::mat Y,
     object = arma_multistage(Y = Y_wtd,
                              samp_unit_ids = clusters,
                              strata = strata,
-                             strata_pop_sizes = strata_pop_sizes),
+                             strata_pop_sizes = strata_pop_sizes,
+                             singleton_method = 'average'),
     expected =   survey:::multistage(x = Y_wtd,
                                      clusters = clusters,
                                      stratas = strata,
@@ -267,7 +272,8 @@ arma::mat arma_multistage(arma::mat Y,
     'arma_multistage' = arma_multistage(Y = Y_wtd,
                                         samp_unit_ids = clusters,
                                         strata = strata,
-                                        strata_pop_sizes = strata_pop_sizes),
+                                        strata_pop_sizes = strata_pop_sizes,
+                                        singleton_method = 'average'),
     'survey:::multistage' =   survey:::multistage(x = Y_wtd,
                                                   clusters = clusters,
                                                   stratas = strata,
