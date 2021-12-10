@@ -183,6 +183,9 @@ arma::mat arma_multistage(arma::mat Y,
 }
 
 /*** R
+run_r_code <- FALSE
+
+if (run_r_code) {
 # Create an example survey design ----
 
   set.seed(1999)
@@ -274,8 +277,8 @@ arma::mat arma_multistage(arma::mat Y,
   strata = lapply(multistage_design$strata,
                   MARGIN = 2, FUN = as.numeric) |>
     do.call(what = cbind)
-  clusters <- multistage_design$cluster %>%
-    lapply(as.numeric) %>% Reduce(f = cbind)
+  clusters <- multistage_design$cluster |>
+    lapply(as.numeric) |> Reduce(f = cbind)
 
   strata_samp_sizes = as.matrix(multistage_design$fpc$sampsize)
   strata_pop_sizes = as.matrix(multistage_design$fpc$popsize)
@@ -316,4 +319,5 @@ arma::mat arma_multistage(arma::mat Y,
                                                   fpcs = fpcs$popsize,
                                                   cal = NULL)
   )
+}
 */
