@@ -6,6 +6,7 @@
 arma::mat arma_onestage(arma::mat Y,
                         arma::colvec samp_unit_ids,
                         arma::colvec strata,
+                        arma::colvec strata_samp_sizes,
                         arma::colvec strata_pop_sizes,
                         Rcpp::CharacterVector singleton_method) {
 
@@ -18,11 +19,19 @@ arma::mat arma_onestage(arma::mat Y,
 
   arma::uword H = distinct_strata_ids.n_elem;
 
-  // Initialize vectors giving number of PSUs per stratum
-  // and vector giving sampling fraction
-  arma::uvec n_h (H, arma::fill::ones);
-  arma::uvec N_h (H, arma::fill::ones);
-  arma::dvec f_h (H, arma::fill::zeros);
+  // Check for singleton strata
+  bool any_singleton_strata = min(strata_samp_sizes) < 2;
+  arma::uword n_singleton_strata = 0;
+
+  if (any_singleton_strata) {
+    if (singleton_method[0] == "adjust") {
+      // Recenter around overall mean of sampling units
+      arma::colvec unique_ids = unique(samp_unit_ids);
+      int n = unique_ids.n_elem;
+      arma::rowvec Y_means = sum(Y, 0) / n;
+      Y = Y - Y_means;
+    }
+  }
 
   // Get information from each stratum:
   // - Number of sampling units, in sample and population
@@ -33,32 +42,47 @@ arma::mat arma_onestage(arma::mat Y,
     // Determine which rows of data correspond to the current stratum
     arma::uvec h_indices = arma::find(strata==distinct_strata_ids[h]);
 
-    // Get count of sampling units in stratum
+    // Get counts of sampling units in stratum, and corresponding sampling rate
     arma::colvec h_distinct_samp_unit_ids = unique(samp_unit_ids.elem(h_indices));
-    n_h[h] = h_distinct_samp_unit_ids.n_elem;
-    N_h[h] = min(strata_pop_sizes.elem(h_indices));
-    f_h[h] = static_cast<double>(n_h[h]) /  static_cast<double>(N_h[h]);
+    int n_h = min(strata_samp_sizes.elem(h_indices));
+    int N_h = min(strata_pop_sizes.elem(h_indices));
+    double f_h = static_cast<double>(n_h) /  static_cast<double>(N_h);
 
-    arma::mat Y_h = Y.rows(h_indices);
-    arma::rowvec mean_Yhi = arma::sum(Y_h, 0) / n_h[h];
-
+    // Increment count of singleton strata
+    // and determine denominator to use for
+    // estimating variance of PSU totals
     arma::uword df;
-    if (n_h[h] > 1) {
-      df = n_h[h] - 1;
-    } else {
+    if (n_h < 2) {
+      n_singleton_strata += 1;
       df = 1;
+    } else {
+      df = n_h - 1;
     }
-    arma::mat cov_mat(n_col_y, n_col_y, arma::fill::zeros);
-    for (arma::uword i=0; i < h_distinct_samp_unit_ids.n_elem; ++i ) {
-      arma::uvec unit_indices = arma::find(samp_unit_ids.elem(h_indices) == h_distinct_samp_unit_ids[i]);
-      arma::rowvec Yhi = sum(Y_h.rows(unit_indices), 0);
-      Yhi = Yhi - mean_Yhi;
 
-      cov_mat += (arma::trans(Yhi)*Yhi);
+    if ((n_h > 1) | (singleton_method[0] == "adjust")) {
+      // Subset variables of interest to stratum
+      // and calculate means for stratum
+      arma::mat Y_h = Y.rows(h_indices);
+      arma::rowvec mean_Yhi = arma::sum(Y_h, 0) / n_h;
+
+      // Estimate variance-covariance of PSU totals
+      arma::mat cov_mat(n_col_y, n_col_y, arma::fill::zeros);
+      for (arma::uword i=0; i < h_distinct_samp_unit_ids.n_elem; ++i ) {
+        arma::uvec unit_indices = arma::find(samp_unit_ids.elem(h_indices) == h_distinct_samp_unit_ids[i]);
+        arma::rowvec Yhi = sum(Y_h.rows(unit_indices), 0);
+        Yhi = Yhi - mean_Yhi;
+
+        cov_mat += (arma::trans(Yhi)*Yhi);
+      }
+      cov_mat = cov_mat / df;
+
+      // Add variance contribution
+      result += ((1 - f_h) * n_h) * cov_mat;
     }
-    cov_mat = cov_mat / df;
+  }
 
-    result += ((1 - f_h[h]) * n_h[h]) * cov_mat;
+  if (any_singleton_strata & (singleton_method[0] == "average")) {
+    result += result * n_singleton_strata;
   }
 
   return result;
@@ -68,6 +92,7 @@ arma::mat arma_onestage(arma::mat Y,
 arma::mat arma_multistage(arma::mat Y,
                           arma::mat samp_unit_ids,
                           arma::mat strata,
+                          arma::mat strata_samp_sizes,
                           arma::mat strata_pop_sizes,
                           Rcpp::CharacterVector singleton_method) {
 
@@ -79,23 +104,27 @@ arma::mat arma_multistage(arma::mat Y,
 
   arma::mat later_stage_ids;
   arma::mat later_stage_strata;
+  arma::mat later_stage_strata_samp_sizes;
   arma::mat later_stage_strata_pop_sizes;
 
   if (n_stages > 1) {
     later_stage_ids = samp_unit_ids.tail_cols(n_stages - 1);
     later_stage_strata = strata.tail_cols(n_stages - 1);
+    later_stage_strata_samp_sizes = strata_samp_sizes.tail_cols(n_stages-1);
     later_stage_strata_pop_sizes = strata_pop_sizes.tail_cols(n_stages-1);
   }
 
   // Obtain first stage information
   arma::colvec first_stage_ids = samp_unit_ids.col(0);
   arma::colvec first_stage_strata = strata.col(0);
+  arma::colvec first_stage_strata_samp_sizes = strata_samp_sizes.col(0);
   arma::colvec first_stage_strata_pop_sizes = strata_pop_sizes.col(0);
 
   // Calculate first-stage variance
   arma::mat V = arma_onestage(Y = Y,
                               samp_unit_ids = first_stage_ids,
                               strata = first_stage_strata,
+                              strata_samp_sizes = first_stage_strata_samp_sizes,
                               strata_pop_sizes = first_stage_strata_pop_sizes,
                               singleton_method = singleton_method);
 
@@ -118,13 +147,14 @@ arma::mat arma_multistage(arma::mat Y,
 
       arma::mat h_strata = later_stage_strata.rows(h_indices);
 
+      arma::mat h_strata_samp_sizes = later_stage_strata_samp_sizes.rows(h_indices);
       arma::mat h_strata_pop_sizes = later_stage_strata_pop_sizes.rows(h_indices);
 
       // Get count of first-stage sampling units in first-stage stratum
       // and finite population correction
       arma::colvec h_first_stage_units = first_stage_ids.elem(h_indices);
       arma::colvec h_unique_psus = unique(h_first_stage_units);
-      arma::uword n_h = h_unique_psus.n_elem;
+      arma::uword n_h = min(first_stage_strata_samp_sizes.elem(h_indices));
       arma::uword N_h = min(first_stage_strata_pop_sizes.elem(h_indices));
       double f_h = static_cast<double>(n_h) /  static_cast<double>(N_h);
 
@@ -134,12 +164,14 @@ arma::mat arma_multistage(arma::mat Y,
         arma::mat Y_hi = Y_h.rows(unit_indices);
         arma::mat hi_samp_unit_ids = h_samp_unit_ids.rows(unit_indices);
         arma::mat hi_strata = h_strata.rows(unit_indices);
+        arma::mat hi_strata_samp_sizes = h_strata_samp_sizes.rows(unit_indices);
         arma::mat hi_strata_pop_sizes = h_strata_pop_sizes.rows(unit_indices);
 
         // Estimate later-stage variance contribution
         arma::mat V_hi = f_h * arma_multistage(Y_hi,
                                                hi_samp_unit_ids,
                                                hi_strata,
+                                               hi_strata_samp_sizes,
                                                hi_strata_pop_sizes,
                                                singleton_method);
         V += V_hi;
@@ -245,6 +277,7 @@ arma::mat arma_multistage(arma::mat Y,
   clusters <- multistage_design$cluster %>%
     lapply(as.numeric) %>% Reduce(f = cbind)
 
+  strata_samp_sizes = as.matrix(multistage_design$fpc$sampsize)
   strata_pop_sizes = as.matrix(multistage_design$fpc$popsize)
 
 
@@ -256,6 +289,7 @@ arma::mat arma_multistage(arma::mat Y,
     object = arma_multistage(Y = Y_wtd,
                              samp_unit_ids = clusters,
                              strata = strata,
+                             strata_samp_sizes = strata_samp_sizes,
                              strata_pop_sizes = strata_pop_sizes,
                              singleton_method = 'average'),
     expected =   survey:::multistage(x = Y_wtd,
@@ -272,6 +306,7 @@ arma::mat arma_multistage(arma::mat Y,
     'arma_multistage' = arma_multistage(Y = Y_wtd,
                                         samp_unit_ids = clusters,
                                         strata = strata,
+                                        strata_samp_sizes = strata_samp_sizes,
                                         strata_pop_sizes = strata_pop_sizes,
                                         singleton_method = 'average'),
     'survey:::multistage' =   survey:::multistage(x = Y_wtd,
