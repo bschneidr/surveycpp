@@ -6,7 +6,7 @@
 // [[Rcpp::export]]
 arma::mat arma_onestage(arma::mat Y,
                         arma::colvec samp_unit_ids,
-                        arma::colvec strata,
+                        arma::colvec strata_ids,
                         arma::colvec strata_samp_sizes,
                         arma::colvec strata_pop_sizes,
                         Rcpp::CharacterVector singleton_method) {
@@ -16,7 +16,7 @@ arma::mat arma_onestage(arma::mat Y,
   arma::mat result(n_col_y, n_col_y, arma::fill::zeros);
 
   // Get distinct strata ids and their length, H
-  arma::colvec distinct_strata_ids = unique(strata);
+  arma::colvec distinct_strata_ids = unique(strata_ids);
 
   arma::uword H = distinct_strata_ids.n_elem;
 
@@ -43,7 +43,7 @@ arma::mat arma_onestage(arma::mat Y,
   for (arma::uword h = 0; h < H; ++h) {
 
     // Determine which rows of data correspond to the current stratum
-    arma::uvec h_indices = arma::find(strata==distinct_strata_ids[h]);
+    arma::uvec h_indices = arma::find(strata_ids==distinct_strata_ids[h]);
 
     // Get counts of sampling units in stratum, and corresponding sampling rate
     arma::colvec h_distinct_samp_unit_ids = unique(samp_unit_ids.elem(h_indices));
@@ -106,7 +106,7 @@ arma::mat arma_onestage(arma::mat Y,
 // [[Rcpp::export]]
 arma::mat arma_multistage(arma::mat Y,
                           arma::mat samp_unit_ids,
-                          arma::mat strata,
+                          arma::mat strata_ids,
                           arma::mat strata_samp_sizes,
                           arma::mat strata_pop_sizes,
                           Rcpp::CharacterVector singleton_method,
@@ -125,21 +125,21 @@ arma::mat arma_multistage(arma::mat Y,
 
   if ((n_stages > 1) & !use_only_first_stage[0]) {
     later_stage_ids = samp_unit_ids.tail_cols(n_stages - 1);
-    later_stage_strata = strata.tail_cols(n_stages - 1);
+    later_stage_strata = strata_ids.tail_cols(n_stages - 1);
     later_stage_strata_samp_sizes = strata_samp_sizes.tail_cols(n_stages-1);
     later_stage_strata_pop_sizes = strata_pop_sizes.tail_cols(n_stages-1);
   }
 
   // Obtain first stage information
   arma::colvec first_stage_ids = samp_unit_ids.col(0);
-  arma::colvec first_stage_strata = strata.col(0);
+  arma::colvec first_stage_strata = strata_ids.col(0);
   arma::colvec first_stage_strata_samp_sizes = strata_samp_sizes.col(0);
   arma::colvec first_stage_strata_pop_sizes = strata_pop_sizes.col(0);
 
   // Calculate first-stage variance
   arma::mat V = arma_onestage(Y = Y,
                               samp_unit_ids = first_stage_ids,
-                              strata = first_stage_strata,
+                              strata_ids = first_stage_strata,
                               strata_samp_sizes = first_stage_strata_samp_sizes,
                               strata_pop_sizes = first_stage_strata_pop_sizes,
                               singleton_method = singleton_method);
@@ -317,7 +317,7 @@ if (run_r_code) {
     testthat::expect_equal(
       object = arma_multistage(Y = Y_wtd,
                                samp_unit_ids = clusters,
-                               strata = strata,
+                               strata_ids = strata,
                                strata_samp_sizes = strata_samp_sizes,
                                strata_pop_sizes = strata_pop_sizes,
                                singleton_method = 'average',
@@ -338,7 +338,7 @@ if (run_r_code) {
     microbenchmark::microbenchmark(
       'arma_multistage' = arma_multistage(Y = Y_wtd,
                                           samp_unit_ids = clusters,
-                                          strata = strata,
+                                          strata_ids = strata,
                                           strata_samp_sizes = strata_samp_sizes,
                                           strata_pop_sizes = strata_pop_sizes,
                                           singleton_method = 'average'),
