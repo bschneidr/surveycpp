@@ -2,6 +2,7 @@
 #include <RcppArmadillo.h>
 // [[Rcpp::depends(RcppArmadillo)]]
 
+//' @export
 // [[Rcpp::export]]
 arma::mat arma_onestage(arma::mat Y,
                         arma::colvec samp_unit_ids,
@@ -23,13 +24,15 @@ arma::mat arma_onestage(arma::mat Y,
   bool any_singleton_strata = min(strata_samp_sizes) < 2;
   arma::uword n_singleton_strata = 0;
 
+  // Get number of distinct sampling units
+  arma::colvec unique_ids = unique(samp_unit_ids);
+  int n = unique_ids.n_elem;
+
+  // If `singleton_method = "adjust", get mean of all sampling units
+  arma::rowvec Y_means;
   if (any_singleton_strata) {
     if (singleton_method[0] == "adjust") {
-      // Recenter around overall mean of sampling units
-      arma::colvec unique_ids = unique(samp_unit_ids);
-      int n = unique_ids.n_elem;
-      arma::rowvec Y_means = sum(Y, 0) / n;
-      Y = Y - Y_means;
+      Y_means = sum(Y, 0) / n;
     }
   }
 
@@ -45,8 +48,13 @@ arma::mat arma_onestage(arma::mat Y,
     // Get counts of sampling units in stratum, and corresponding sampling rate
     arma::colvec h_distinct_samp_unit_ids = unique(samp_unit_ids.elem(h_indices));
     int n_h = min(strata_samp_sizes.elem(h_indices));
-    int N_h = min(strata_pop_sizes.elem(h_indices));
-    double f_h = static_cast<double>(n_h) /  static_cast<double>(N_h);
+    double N_h = static_cast<double>(min(strata_pop_sizes.elem(h_indices)));
+    double f_h;
+    if (arma::is_finite(N_h)) {
+      f_h = static_cast<double>(n_h) /  N_h;
+    } else {
+      f_h = 0.0;
+    }
 
     // Increment count of singleton strata
     // and determine denominator to use for
@@ -70,31 +78,39 @@ arma::mat arma_onestage(arma::mat Y,
       for (arma::uword i=0; i < h_distinct_samp_unit_ids.n_elem; ++i ) {
         arma::uvec unit_indices = arma::find(samp_unit_ids.elem(h_indices) == h_distinct_samp_unit_ids[i]);
         arma::rowvec Yhi = sum(Y_h.rows(unit_indices), 0);
-        Yhi = Yhi - mean_Yhi;
+        if (n_h > 1) {
+          Yhi.each_row() -= mean_Yhi;
+        } else {
+          Yhi.each_row() -= Y_means;
+        }
 
         cov_mat += (arma::trans(Yhi)*Yhi);
       }
       cov_mat = cov_mat / df;
 
       // Add variance contribution
-      result += ((1 - f_h) * n_h) * cov_mat;
+      result += ((1.0 - f_h) * n_h) * cov_mat;
     }
   }
 
   if (any_singleton_strata & (singleton_method[0] == "average")) {
-    result += result * n_singleton_strata;
+    int n_nonsingleton_strata = H - n_singleton_strata;
+    double scaling_factor = static_cast<double>(n_singleton_strata)/static_cast<double>(n_nonsingleton_strata);
+    result += result * scaling_factor;
   }
 
   return result;
 }
 
+//' @export
 // [[Rcpp::export]]
 arma::mat arma_multistage(arma::mat Y,
                           arma::mat samp_unit_ids,
                           arma::mat strata,
                           arma::mat strata_samp_sizes,
                           arma::mat strata_pop_sizes,
-                          Rcpp::CharacterVector singleton_method) {
+                          Rcpp::CharacterVector singleton_method,
+                          Rcpp::LogicalVector use_only_first_stage) {
 
   size_t n_stages = samp_unit_ids.n_cols;
 
@@ -107,7 +123,7 @@ arma::mat arma_multistage(arma::mat Y,
   arma::mat later_stage_strata_samp_sizes;
   arma::mat later_stage_strata_pop_sizes;
 
-  if (n_stages > 1) {
+  if ((n_stages > 1) & !use_only_first_stage[0]) {
     later_stage_ids = samp_unit_ids.tail_cols(n_stages - 1);
     later_stage_strata = strata.tail_cols(n_stages - 1);
     later_stage_strata_samp_sizes = strata_samp_sizes.tail_cols(n_stages-1);
@@ -129,7 +145,7 @@ arma::mat arma_multistage(arma::mat Y,
                               singleton_method = singleton_method);
 
   // For each first-stage unit, get variance contribution from next stage
-  if (n_stages > 1) {
+  if ((n_stages > 1) & !use_only_first_stage[0]) {
 
     // Get distinct first-stage strata ids and their length, H
     arma::colvec distinct_strata_ids = unique(first_stage_strata);
@@ -155,8 +171,14 @@ arma::mat arma_multistage(arma::mat Y,
       arma::colvec h_first_stage_units = first_stage_ids.elem(h_indices);
       arma::colvec h_unique_psus = unique(h_first_stage_units);
       arma::uword n_h = min(first_stage_strata_samp_sizes.elem(h_indices));
-      arma::uword N_h = min(first_stage_strata_pop_sizes.elem(h_indices));
-      double f_h = static_cast<double>(n_h) /  static_cast<double>(N_h);
+      double N_h = static_cast<double>(min(strata_pop_sizes.elem(h_indices)));
+
+      double f_h;
+      if (arma::is_finite(N_h)) {
+        f_h = static_cast<double>(n_h) /  N_h;
+      } else {
+        f_h = 0.0;
+      }
 
       for (arma::uword i=0; i < n_h; ++i ) {
         // Create subsets of inputs specific to current first-stage sampling unit
@@ -173,7 +195,8 @@ arma::mat arma_multistage(arma::mat Y,
                                                hi_strata,
                                                hi_strata_samp_sizes,
                                                hi_strata_pop_sizes,
-                                               singleton_method);
+                                               singleton_method,
+                                               use_only_first_stage);
         V += V_hi;
 
       }
@@ -183,10 +206,12 @@ arma::mat arma_multistage(arma::mat Y,
 }
 
 /*** R
-run_r_code <- FALSE
+run_r_code <- TRUE
+check_matches <- TRUE
+compare_speeds <- FALSE
 
 if (run_r_code) {
-# Create an example survey design ----
+  # Create an example survey design ----
 
   set.seed(1999)
 
@@ -194,7 +219,7 @@ if (run_r_code) {
   options("survey.ultimate.cluster" = FALSE)
   data(api, package = 'survey')
 
-##_ Create a fake population to sample from
+  ##_ Create a fake population to sample from
   population <- MASS::mvrnorm(n = 100000,
                               mu = colMeans(apipop[,c('api00', 'api99')]),
                               Sigma = cov(apipop[,c('api00', 'api99')])) |>
@@ -215,7 +240,7 @@ if (run_r_code) {
   population <- population[,c('stratum', 'psu_id', 'ssu_id',
                               'api00', 'api99')]
 
-##_ Add columns giving population sizes needed for FPCs
+  ##_ Add columns giving population sizes needed for FPCs
   population <- aggregate(x = population$psu_id,
                           by = population[,'stratum', drop = FALSE],
                           FUN = function(x) length(unique(x))) |>
@@ -230,7 +255,7 @@ if (run_r_code) {
     merge(x = population,
           by = c("stratum", "psu_id"))
 
-##_ Draw stratified multistage sample
+  ##_ Draw stratified multistage sample
   population$is_sampled <- FALSE
 
   for (stratum_h in unique(population$stratum)) {
@@ -251,8 +276,8 @@ if (run_r_code) {
       sampled_ssus <- sample(ssus_in_psu_of_stratum_h, size = 5, replace = FALSE)
 
       sample_indices <- which(population$stratum == stratum_h &
-                              population$psu_id == h_psu &
-                              population$ssu_id %in% sampled_ssus)
+                                population$psu_id == h_psu &
+                                population$ssu_id %in% sampled_ssus)
 
       population[['is_sampled']][sample_indices] <- TRUE
 
@@ -261,14 +286,14 @@ if (run_r_code) {
 
   sample_data <- population[population$is_sampled,]
 
-##_Declare survey design ----
+  ##_Declare survey design ----
   multistage_design <- svydesign(strata = ~ stratum,
                                  id = ~ psu_id + ssu_id,
                                  fpc = ~ N_psus + N_ssus,
                                  nest = TRUE,
                                  data = sample_data)
 
-# Extract inputs ----
+  # Extract inputs ----
   Y = as.matrix(multistage_design$variables[,c('api00', 'api99')])
   Y_wtd <- Y |> apply(MARGIN = 2,
                       function(x) x/multistage_design$prob)
@@ -286,38 +311,44 @@ if (run_r_code) {
 
   fpcs <- multistage_design$fpc
 
-# Check that results match ----
+  # Check that results match ----
 
-  testthat::expect_equal(
-    object = arma_multistage(Y = Y_wtd,
-                             samp_unit_ids = clusters,
-                             strata = strata,
-                             strata_samp_sizes = strata_samp_sizes,
-                             strata_pop_sizes = strata_pop_sizes,
-                             singleton_method = 'average'),
-    expected =   survey:::multistage(x = Y_wtd,
-                                     clusters = clusters,
-                                     stratas = strata,
-                                     nPSUs = fpcs$sampsize,
-                                     fpcs = fpcs$popsize,
-                                     cal = NULL) |> unname()
-  )
+  if (check_matches) {
+    testthat::expect_equal(
+      object = arma_multistage(Y = Y_wtd,
+                               samp_unit_ids = clusters,
+                               strata = strata,
+                               strata_samp_sizes = strata_samp_sizes,
+                               strata_pop_sizes = strata_pop_sizes,
+                               singleton_method = 'average',
+                               use_only_first_stage = FALSE),
+      expected =   survey:::multistage(x = Y_wtd,
+                                       clusters = clusters,
+                                       stratas = strata,
+                                       nPSUs = fpcs$sampsize,
+                                       fpcs = fpcs$popsize,
+                                       lonely.psu = 'average',
+                                       cal = NULL) |> unname()
+    )
+  }
 
-# Benchmark ----
+  # Benchmark ----
 
-  microbenchmark::microbenchmark(
-    'arma_multistage' = arma_multistage(Y = Y_wtd,
-                                        samp_unit_ids = clusters,
-                                        strata = strata,
-                                        strata_samp_sizes = strata_samp_sizes,
-                                        strata_pop_sizes = strata_pop_sizes,
-                                        singleton_method = 'average'),
-    'survey:::multistage' =   survey:::multistage(x = Y_wtd,
-                                                  clusters = clusters,
-                                                  stratas = strata,
-                                                  nPSUs = fpcs$sampsize,
-                                                  fpcs = fpcs$popsize,
-                                                  cal = NULL)
-  )
+  if (compare_speeds) {
+    microbenchmark::microbenchmark(
+      'arma_multistage' = arma_multistage(Y = Y_wtd,
+                                          samp_unit_ids = clusters,
+                                          strata = strata,
+                                          strata_samp_sizes = strata_samp_sizes,
+                                          strata_pop_sizes = strata_pop_sizes,
+                                          singleton_method = 'average'),
+      'survey:::multistage' =   survey:::multistage(x = Y_wtd,
+                                                    clusters = clusters,
+                                                    stratas = strata,
+                                                    nPSUs = fpcs$sampsize,
+                                                    fpcs = fpcs$popsize,
+                                                    cal = NULL)
+    )
+  }
 }
 */
