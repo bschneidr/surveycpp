@@ -95,7 +95,12 @@ arma::mat arma_onestage(arma::mat Y,
 
   if (any_singleton_strata & (singleton_method[0] == "average")) {
     int n_nonsingleton_strata = H - n_singleton_strata;
-    double scaling_factor = static_cast<double>(n_singleton_strata)/static_cast<double>(n_nonsingleton_strata);
+    double scaling_factor;
+    if (n_nonsingleton_strata > 0) {
+      scaling_factor = static_cast<double>(n_singleton_strata)/static_cast<double>(n_nonsingleton_strata);
+    } else {
+      Rcpp::stop("All strata contain only one sampling unit; `singleton_method = 'average'` is useless in this case.");
+    }
     result += result * scaling_factor;
   }
 
